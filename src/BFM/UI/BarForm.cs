@@ -68,7 +68,11 @@ internal sealed class BarForm : Form
             ReleaseHeld();
             CheckChargeReminder();
         };
-        _zOrderTimer.Tick += (_, _) => KeepOnTop();
+        _zOrderTimer.Tick += (_, _) =>
+        {
+            RecheckForeground();
+            KeepOnTop();
+        };
         _deviceChangeTimer.Tick += (_, _) =>
         {
             _deviceChangeTimer.Stop();
@@ -368,16 +372,7 @@ internal sealed class BarForm : Form
     {
         if (hwnd == IntPtr.Zero || hwnd == Handle || (_flyout is not null && hwnd == _flyout.Handle)) return;
         var cls = User32.ClassName(hwnd);
-
-        bool fullscreen = false;
-        if (cls is not ("Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd")
-            && User32.GetWindowRect(hwnd, out var wr))
-        {
-            var screen = Screen.FromHandle(hwnd).Bounds;
-            var rect = wr.ToRectangle();
-            fullscreen = rect.Left <= screen.Left && rect.Top <= screen.Top
-                         && rect.Right >= screen.Right && rect.Bottom >= screen.Bottom;
-        }
+        bool fullscreen = CoversTaskbarScreen(hwnd, cls);
 
         if (fullscreen != _fullscreenHidden)
         {
@@ -390,6 +385,28 @@ internal sealed class BarForm : Form
             KeepOnTop();
         }
     }
+
+    /// <summary>
+    /// True when the window fills the whole monitor the bar sits on. A fullscreen window on another
+    /// monitor doesn't cover the bar, so it must not hide it.
+    /// </summary>
+    bool CoversTaskbarScreen(IntPtr hwnd, string cls)
+    {
+        if (cls is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd") return false;
+        if (!User32.IsWindowVisible(hwnd) || User32.IsCloaked(hwnd) || !User32.GetWindowRect(hwnd, out var wr)) return false;
+        var screen = Screen.FromHandle(hwnd);
+        if (_trayHwnd != IntPtr.Zero && !screen.Equals(Screen.FromHandle(_trayHwnd))) return false;
+        var bounds = screen.Bounds;
+        var rect = wr.ToRectangle();
+        return rect.Left <= bounds.Left && rect.Top <= bounds.Top
+               && rect.Right >= bounds.Right && rect.Bottom >= bounds.Bottom;
+    }
+
+    /// <summary>
+    /// Windows can enter or leave fullscreen without a foreground change (F11, a video's fullscreen button),
+    /// which the foreground hook never sees; re-check on the existing z-order tick.
+    /// </summary>
+    void RecheckForeground() => OnForegroundChanged(IntPtr.Zero, 0, User32.GetForegroundWindow(), 0, 0, 0, 0);
 
     protected override void WndProc(ref Message m)
     {
