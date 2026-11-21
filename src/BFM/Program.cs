@@ -78,7 +78,13 @@ internal static class Program
         var bar = new BarForm(monitor, settings) { JustUpdated = Has("--updated") };
         var wait = ThreadPool.RegisterWaitForSingleObject(showSettings,
             (_, _) => bar.BeginInvokeSafe(() => bar.OpenSettings()), null, Timeout.Infinite, executeOnlyOnce: false);
-        Application.Run(bar);
+        // Not Application.Run(bar): while embedded, the bar's window is a child of Explorer's taskbar and is
+        // destroyed when Explorer restarts, which would end a run tied to it. Only closing the bar (Exit, an
+        // update restart) ends the app; the bar re-attaches to the new taskbar on its own.
+        var context = new ApplicationContext();
+        bar.FormClosed += (_, _) => context.ExitThread();
+        bar.Show();
+        Application.Run(context);
         wait.Unregister(null);
         settings.Save();
         return 0;

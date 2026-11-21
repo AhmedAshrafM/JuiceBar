@@ -28,6 +28,8 @@ public sealed class DevicePrefs
 public sealed class Settings
 {
     public int OffsetX { get; set; }
+    /// <summary>Live inside the taskbar window, so the bar stays visible over Start, Quick Settings and other shell panels.</summary>
+    public bool EmbedInTaskbar { get; set; } = true;
     public bool ShowDisconnected { get; set; } = true;
     public int AlertThreshold { get; set; } = 15;
     public int DonglePollMinutes { get; set; } = 5;

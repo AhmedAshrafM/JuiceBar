@@ -13,6 +13,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <Version>0.3.1</Version>
     <ApplicationIcon>JuiceBar.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <Product>Juice Bar</Product>
     <AssemblyTitle>Juice Bar</AssemblyTitle>
     <Description>Battery levels of your wireless devices on the taskbar</Description>

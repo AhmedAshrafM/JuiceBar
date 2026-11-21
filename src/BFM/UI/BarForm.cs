@@ -49,7 +49,12 @@ internal sealed class BarForm : Form
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
-        TopMost = true;
+        // Posting through the sync context (not this window) keeps working while Explorer restarts and the
+        // embedded window has been destroyed along with the old taskbar.
+        _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+        _host = new HostWindow(this);
+        _embedIn = settings.EmbedInTaskbar ? User32.FindWindowW("Shell_TrayWnd", null) : IntPtr.Zero;
+        TopMost = _embedIn == IntPtr.Zero;
         BackColor = Key;
         TransparencyKey = Key;
         DoubleBuffered = true;
@@ -68,7 +73,11 @@ internal sealed class BarForm : Form
             ReleaseHeld();
             CheckChargeReminder();
         };
-        _zOrderTimer.Tick += (_, _) => KeepOnTop();
+        _zOrderTimer.Tick += (_, _) =>
+        {
+            EnsureEmbedded();
+            KeepOnTop();
+        };
         _deviceChangeTimer.Tick += (_, _) =>
         {
             _deviceChangeTimer.Stop();
@@ -85,8 +94,17 @@ internal sealed class BarForm : Form
         get
         {
             const int WsExToolWindow = 0x80, WsExTopmost = 0x8, WsExNoActivate = 0x08000000;
+            const int WsChild = 0x40000000, WsPopup = unchecked((int)0x80000000), WsClipSiblings = 0x04000000;
             var cp = base.CreateParams;
             cp.ExStyle |= WsExToolWindow | WsExTopmost | WsExNoActivate;
+            if (_embedIn != IntPtr.Zero && User32.IsWindow(_embedIn))
+            {
+                // A child of the taskbar window shares its z-order band, so shell panels that lift the
+                // taskbar above every top-most window (Start, Quick Settings) lift the bar with it.
+                cp.Parent = _embedIn;
+                cp.Style = (cp.Style & ~WsPopup) | WsChild | WsClipSiblings;
+                cp.ExStyle &= ~(WsExToolWindow | WsExTopmost);
+            }
             return cp;
         }
     }
@@ -96,22 +114,136 @@ internal sealed class BarForm : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        _hook = User32.SetWinEventHook(User32.EventSystemForeground, User32.EventSystemForeground, IntPtr.Zero,
-            _foregroundProc, 0, 0, User32.WineventOutOfContext);
+        BeginInvokeSafe(EnsureEmbedded);
+        // The handle is created again when switching between embedded and floating, or after Explorer
+        // restarts; the hooks and raw input belong to the host window and are set up once.
+        if (_hook == IntPtr.Zero)
+            _hook = User32.SetWinEventHook(User32.EventSystemForeground, User32.EventSystemForeground, IntPtr.Zero,
+                _foregroundProc, 0, 0, User32.WineventOutOfContext);
         HookTaskbar();
-        _rawMouse = new RawMouse(Handle, 30_000);
-        _rawMouse.Moved += path =>
+        if (_rawMouse is null)
         {
-            if (UgreenReceiverProvider.IsReceiverPath(path) && UgreenReceiverProvider.NoteActivity())
-                _ = _monitor.RefreshAsync(false);
-        };
+            _rawMouse = new RawMouse(_host.Handle, 30_000);
+            _rawMouse.Moved += path =>
+            {
+                if (UgreenReceiverProvider.IsReceiverPath(path) && UgreenReceiverProvider.NoteActivity())
+                    _ = _monitor.RefreshAsync(false);
+            };
+        }
     }
 
     RawMouse? _rawMouse;
+    readonly HostWindow _host;
+    readonly SynchronizationContext _ui;
+    /// <summary>The taskbar window the bar lives in, or zero while it floats as a top-most window.</summary>
+    IntPtr _embedIn;
+
+    bool Embedded => _embedIn != IntPtr.Zero && IsHandleCreated && User32.GetParent(Handle) == _embedIn;
+
+    /// <summary>Moves the bar into (or out of) the given taskbar window by recreating its window.</summary>
+    void AttachTo(IntPtr taskbar)
+    {
+        bool wasVisible = Visible;
+        _embedIn = taskbar;
+        TopMost = taskbar == IntPtr.Zero;
+        if (IsHandleCreated) RecreateHandle();
+        else CreateHandle();
+        EnsureEmbedded();
+        if (wasVisible && IsHandleCreated) User32.ShowWindow(Handle, User32.SwShowNoActivate);
+        PositionOnTaskbar();
+        UpdateVisibility();
+    }
+
+    /// <summary>
+    /// WinForms re-parents a form that is hidden from the taskbar to its own invisible owner window right
+    /// after creating it (and again whenever its owner is updated), which pulls the bar out of the taskbar.
+    /// Put it back whenever that happened.
+    /// </summary>
+    void EnsureEmbedded()
+    {
+        if (_embedIn == IntPtr.Zero || !IsHandleCreated || !User32.IsWindow(_embedIn) || User32.GetParent(Handle) == _embedIn) return;
+        User32.SetParent(Handle, _embedIn);
+        PositionOnTaskbar();
+    }
+
+    /// <summary>Every window creation goes through here: if Windows refuses the child window, float instead of crashing.</summary>
+    protected override void CreateHandle()
+    {
+        try
+        {
+            base.CreateHandle();
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (_embedIn != IntPtr.Zero)
+        {
+            Log.Write("embedding in the taskbar failed, floating instead: " + ex.Message);
+            _embedIn = IntPtr.Zero;
+            TopMost = true;
+            base.CreateHandle();
+        }
+    }
+
+    internal void SetEmbedded(bool embed)
+    {
+        _settings.EmbedInTaskbar = embed;
+        _settings.Save();
+        AttachTo(embed ? _trayHwnd : IntPtr.Zero);
+    }
+
+    /// <summary>Explorer restarted (or rebuilt its taskbar): follow the new taskbar window.</summary>
+    void ReattachToTaskbar()
+    {
+        HookTaskbar();
+        if (_settings.EmbedInTaskbar && _trayHwnd != IntPtr.Zero && !(IsHandleCreated && User32.GetParent(Handle) == _trayHwnd))
+            AttachTo(_trayHwnd);
+        else if (!IsHandleCreated)
+            AttachTo(IntPtr.Zero);
+        PositionOnTaskbar();
+        UpdateVisibility();
+    }
+
+    /// <summary>Messages that reach the hidden host window; returns true when handled.</summary>
+    internal bool OnHostMessage(ref Message m)
+    {
+        if (m.Msg == RawMouse.WmInput)
+        {
+            _rawMouse?.Handle(m.LParam);
+            return false;
+        }
+        if (m.Msg == WmDeviceChange && (int)m.WParam == DbtDevNodesChanged)
+        {
+            _deviceChangeTimer.Stop();
+            _deviceChangeTimer.Start();
+        }
+        else if (m.Msg == _taskbarCreatedMsg && _taskbarCreatedMsg != 0)
+        {
+            BeginInvokeSafe(ReattachToTaskbar);
+        }
+        else if (m.Msg is WmDisplayChange or WmSettingChange)
+        {
+            BeginInvokeSafe(() =>
+            {
+                PositionOnTaskbar();
+                UpdateVisibility();
+            });
+        }
+        else if (m.Msg == WmDpiChanged && _embedIn != IntPtr.Zero)
+        {
+            int dpi = (int)((long)m.WParam & 0xFFFF);
+            BeginInvokeSafe(() =>
+            {
+                ApplyScale(dpi);
+                LayoutChips();
+                PositionOnTaskbar();
+                Invalidate();
+            });
+        }
+        return false;
+    }
 
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
+        EnsureEmbedded();
         PositionOnTaskbar();
         UpdateVisibility();
         _pollTimer.Start();
@@ -129,12 +261,17 @@ internal sealed class BarForm : Form
         if (_trayHook != IntPtr.Zero) User32.UnhookWinEvent(_trayHook);
         _notify?.Dispose();
         _rawMouse?.Dispose();
+        _host.DestroyHandle();
         base.OnFormClosed(e);
     }
 
     internal void BeginInvokeSafe(Action a)
     {
-        if (IsHandleCreated && !IsDisposed) BeginInvoke(a);
+        if (IsDisposed) return;
+        _ui.Post(_ =>
+        {
+            if (!IsDisposed) a();
+        }, null);
     }
 
     void ApplyScale(int dpi)
@@ -318,7 +455,8 @@ internal sealed class BarForm : Form
     }
 
     /// <summary>Kept visible while the pointer is on it or a flyout is open, so it never vanishes mid-click.</summary>
-    bool InUse => _flyout is { IsDisposed: false } || (Visible && Bounds.Contains(Cursor.Position));
+    bool InUse => _flyout is { IsDisposed: false }
+                  || (Visible && IsHandleCreated && RectangleToScreen(ClientRectangle).Contains(Cursor.Position));
 
     void UpdateVisibility()
     {
@@ -348,19 +486,26 @@ internal sealed class BarForm : Form
             int maxX = Math.Max(minX, r.Right - Width - S(6));
             int x = Math.Clamp(minX + _settings.OffsetX, minX, maxX);
             int y = r.Top + (r.Height - Height) / 2;
-            Location = new Point(x, y);
+            Location = ToWindowCoords(new Point(x, y));
         }
         else
         {
-            Location = new Point(r.Left + (r.Width - Width) / 2, r.Top + S(6) + _settings.OffsetX);
+            Location = ToWindowCoords(new Point(r.Left + (r.Width - Width) / 2, r.Top + S(6) + _settings.OffsetX));
         }
         KeepOnTop();
     }
 
+    /// <summary>Screen point to the coordinates Location uses: relative to the taskbar while embedded in it.</summary>
+    Point ToWindowCoords(Point screen) =>
+        Embedded && User32.GetWindowRect(_embedIn, out var parent)
+            ? new Point(screen.X - parent.Left, screen.Y - parent.Top)
+            : screen;
+
     void KeepOnTop()
     {
-        if (!Visible) return;
-        User32.SetWindowPos(Handle, User32.HwndTopmost, 0, 0, 0, 0,
+        if (!Visible || !IsHandleCreated) return;
+        // Embedded: top of the taskbar's own children, above its XAML content. Floating: top-most window.
+        User32.SetWindowPos(Handle, Embedded ? IntPtr.Zero : User32.HwndTopmost, 0, 0, 0, 0,
             User32.SwpNoMove | User32.SwpNoSize | User32.SwpNoActivate | User32.SwpNoOwnerZOrder);
     }
 
@@ -385,39 +530,29 @@ internal sealed class BarForm : Form
             UpdateVisibility();
             if (!fullscreen) ReleaseHeld();
         }
-        else if (cls == "Shell_TrayWnd")
+        KeepOnTop();
+        _ = RaiseAfterShellAsync();
+    }
+
+    /// <summary>
+    /// Opening Quick Settings, the Start menu or another taskbar flyout raises the taskbar above the bar
+    /// a moment after the foreground change, so raise the bar again once the shell has settled.
+    /// </summary>
+    async Task RaiseAfterShellAsync()
+    {
+        foreach (int ms in new[] { 150, 600 })
         {
+            await Task.Delay(ms);
+            if (IsDisposed) return;
             KeepOnTop();
         }
     }
 
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == RawMouse.WmInput)
-            _rawMouse?.Handle(m.LParam);
-        else if (m.Msg == WmDeviceChange && (int)m.WParam == DbtDevNodesChanged)
-        {
-            _deviceChangeTimer.Stop();
-            _deviceChangeTimer.Start();
-        }
-        else if (m.Msg == _taskbarCreatedMsg && _taskbarCreatedMsg != 0)
-        {
-            BeginInvokeSafe(() =>
-            {
-                HookTaskbar();
-                PositionOnTaskbar();
-                UpdateVisibility();
-            });
-        }
-        else if (m.Msg is WmDisplayChange or WmSettingChange)
-        {
-            BeginInvokeSafe(() =>
-            {
-                PositionOnTaskbar();
-                UpdateVisibility();
-            });
-        }
-        else if (m.Msg == WmDpiChanged)
+        // Broadcasts and raw input arrive at the host window (see OnHostMessage); only the floating bar
+        // gets its own DPI change.
+        if (m.Msg == WmDpiChanged)
         {
             base.WndProc(ref m);
             ApplyScale(DeviceDpi);
@@ -581,7 +716,8 @@ internal sealed class BarForm : Form
     {
         foreach (ToolStripItem i in menu.Items) i.ForeColor = Theme.Text;
         menu.Closed += (_, _) => BeginInvokeSafe(menu.Dispose);
-        User32.SetForegroundWindow(Handle);
+        // The host, not the bar: an embedded bar is a child window, which can't be the foreground window.
+        User32.SetForegroundWindow(_host.Handle);
         menu.Show(Cursor.Position, ToolStripDropDownDirection.AboveRight);
     }
 
@@ -655,7 +791,8 @@ internal sealed class BarForm : Form
 
     internal void RenameDevice(DeviceStatus device)
     {
-        var name = InputBox.Show(this, "Rename device", $"Name shown for {device.Name}:", device.Label);
+        // Owned by the host: a dialog owned by the embedded bar would be owned by Explorer's taskbar.
+        var name = InputBox.Show(_host, "Rename device", $"Name shown for {device.Name}:", device.Label);
         if (name is null) return;
         _settings.EditPrefs(device.Id).Name = string.IsNullOrWhiteSpace(name) || name.Trim() == device.Name ? null : name.Trim();
         SettingsChanged();

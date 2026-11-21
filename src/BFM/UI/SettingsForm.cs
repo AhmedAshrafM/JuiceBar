@@ -95,6 +95,7 @@ internal sealed class SettingsForm : Form
             Note("% (0 shows all)")));
         col.Controls.Add(Check("Show disconnected devices", _settings.ShowDisconnected, v => { _settings.ShowDisconnected = v; Changed(); }));
         col.Controls.Add(Check("Show the audio output switch", _settings.AudioChip, v => { _settings.AudioChip = v; Changed(); }));
+        col.Controls.Add(Check("Embed in the taskbar (stays visible over Start and Quick Settings)", _settings.EmbedInTaskbar, _bar.SetEmbedded));
         var reset = MakeButton("Reset bar position", 150);
         reset.Click += (_, _) => _bar.ResetPosition();
         col.Controls.Add(reset);

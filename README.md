@@ -42,7 +42,9 @@ It is a single exe, installs per user without admin rights, and idles at about 1
     set hours, then shown together afterwards.
 - **Audio switch.** One click flips the default output between your headset and speakers; right-click to pick any output.
 - **Fits in.** Dark, compact, follows an auto-hiding taskbar, hides over fullscreen apps, can be dragged
-  along the taskbar. Compact mode shows only icon and number and can hide devices above a level.
+  along the taskbar. Lives inside the taskbar, so it stays visible over Start and Quick Settings (turn off in
+  *Settings > General* to float above it instead). Compact mode shows only icon and number and can hide
+  devices above a level.
 - **Per-device settings.** Rename, reorder, hide, alert levels, lightbar colour.
 - **Self-installing and self-updating.** Checks GitHub once a day, verifies the SHA-256 and swaps itself in place.
 
