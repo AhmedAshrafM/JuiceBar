@@ -385,8 +385,20 @@ internal sealed class BarForm : Form
             UpdateVisibility();
             if (!fullscreen) ReleaseHeld();
         }
-        else if (cls == "Shell_TrayWnd")
+        KeepOnTop();
+        _ = RaiseAfterShellAsync();
+    }
+
+    /// <summary>
+    /// Opening Quick Settings, the Start menu or another taskbar flyout raises the taskbar above the bar
+    /// a moment after the foreground change, so raise the bar again once the shell has settled.
+    /// </summary>
+    async Task RaiseAfterShellAsync()
+    {
+        foreach (int ms in new[] { 150, 600 })
         {
+            await Task.Delay(ms);
+            if (IsDisposed) return;
             KeepOnTop();
         }
     }
