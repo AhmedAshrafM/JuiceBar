@@ -95,8 +95,18 @@ internal sealed class SettingsForm : Form
             Note("% (0 shows all)")));
         col.Controls.Add(Check("Show disconnected devices", _settings.ShowDisconnected, v => { _settings.ShowDisconnected = v; Changed(); }));
         col.Controls.Add(Check("Show the audio output switch", _settings.AudioChip, v => { _settings.AudioChip = v; Changed(); }));
+
+        col.Controls.Add(Heading("Position"));
+        col.Controls.Add(Check("Keep clear of taskbar items (weather, Start, apps, tray)", _settings.AvoidTaskbarItems, _bar.SetAvoidTaskbarItems));
+        var offset = Number(0, 4000, _settings.OffsetX, _bar.SetOffset, step: 10);
+        col.Controls.Add(Row("Move right by", offset, Note("px · or drag the bar along the taskbar")));
+        col.Controls.Add(Note("The bar jumps over app icons into the next free space."));
         var reset = MakeButton("Reset bar position", 150);
-        reset.Click += (_, _) => _bar.ResetPosition();
+        reset.Click += (_, _) =>
+        {
+            _bar.ResetPosition();
+            offset.Value = 0;
+        };
         col.Controls.Add(reset);
 
         col.Controls.Add(Heading("Polling"));

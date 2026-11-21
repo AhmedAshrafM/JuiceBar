@@ -28,6 +28,8 @@ public sealed class DevicePrefs
 public sealed class Settings
 {
     public int OffsetX { get; set; }
+    /// <summary>Keep the bar in free taskbar space, clear of weather, Start, app icons and the tray.</summary>
+    public bool AvoidTaskbarItems { get; set; } = true;
     public bool ShowDisconnected { get; set; } = true;
     public int AlertThreshold { get; set; } = 15;
     public int DonglePollMinutes { get; set; } = 5;

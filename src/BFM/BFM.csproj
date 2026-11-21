@@ -28,6 +28,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Only for UIAutomationClient (finding the taskbar's buttons); no WPF UI is used. -->
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
+  </ItemGroup>
+
+  <ItemGroup>
     <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
   </ItemGroup>
 

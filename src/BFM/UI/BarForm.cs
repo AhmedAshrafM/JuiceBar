@@ -67,6 +67,7 @@ internal sealed class BarForm : Form
             if (UpdateDue()) _ = CheckForUpdateAsync(manual: false);
             ReleaseHeld();
             CheckChargeReminder();
+            RefreshTaskbarItems();
         };
         _zOrderTimer.Tick += (_, _) => KeepOnTop();
         _deviceChangeTimer.Tick += (_, _) =>
@@ -114,6 +115,7 @@ internal sealed class BarForm : Form
         base.OnShown(e);
         PositionOnTaskbar();
         UpdateVisibility();
+        RefreshTaskbarItems();
         _pollTimer.Start();
         _zOrderTimer.Start();
         _ = _monitor.RefreshAsync(true);
@@ -346,7 +348,10 @@ internal sealed class BarForm : Form
         {
             int minX = r.Left + S(6);
             int maxX = Math.Max(minX, r.Right - Width - S(6));
-            int x = Math.Clamp(minX + _settings.OffsetX, minX, maxX);
+            // In free space between taskbar items when they are known; otherwise the plain offset.
+            int x = _taskbarItems is { Count: > 0 } items && TaskbarLayout.Place(r, items, Width, S(6), _settings.OffsetX) is int free
+                ? free
+                : Math.Clamp(minX + _settings.OffsetX, minX, maxX);
             int y = r.Top + (r.Height - Height) / 2;
             Location = new Point(x, y);
         }
@@ -389,6 +394,8 @@ internal sealed class BarForm : Form
         {
             KeepOnTop();
         }
+        // Opening or closing an app adds or removes a taskbar icon and shifts the centred group.
+        RefreshTaskbarItems(700);
     }
 
     protected override void WndProc(ref Message m)
@@ -407,6 +414,7 @@ internal sealed class BarForm : Form
                 HookTaskbar();
                 PositionOnTaskbar();
                 UpdateVisibility();
+                RefreshTaskbarItems(1000);
             });
         }
         else if (m.Msg is WmDisplayChange or WmSettingChange)
@@ -415,6 +423,7 @@ internal sealed class BarForm : Form
             {
                 PositionOnTaskbar();
                 UpdateVisibility();
+                RefreshTaskbarItems(500);
             });
         }
         else if (m.Msg == WmDpiChanged)
@@ -801,10 +810,52 @@ internal sealed class BarForm : Form
         ShowMenuAtCursor(menu);
     }
 
-    internal void ResetPosition()
+    internal void ResetPosition() => SetOffset(0);
+
+    internal void SetOffset(int offset)
     {
-        _settings.OffsetX = 0;
+        _settings.OffsetX = Math.Max(0, offset);
         _settings.Save();
+        PositionOnTaskbar();
+    }
+
+    internal void SetAvoidTaskbarItems(bool avoid)
+    {
+        _settings.AvoidTaskbarItems = avoid;
+        _settings.Save();
+        if (!avoid) _taskbarItems = null;
+        PositionOnTaskbar();
+        RefreshTaskbarItems();
+    }
+
+    List<Rectangle>? _taskbarItems;
+    int _layoutRequest;
+
+    /// <summary>
+    /// Re-reads where the taskbar's items are, off the UI thread, then moves the bar if they changed.
+    /// Runs at start, on the minute poll and shortly after the foreground window changes (opening or
+    /// closing an app adds or removes an icon and shifts the centred group). Calls inside the delay collapse.
+    /// </summary>
+    internal async void RefreshTaskbarItems(int delayMs = 0, bool confirming = false)
+    {
+        int request = ++_layoutRequest;
+        if (delayMs > 0) await Task.Delay(delayMs);
+        if (request != _layoutRequest || IsDisposed || !_settings.AvoidTaskbarItems || _trayHwnd == IntPtr.Zero) return;
+        var tray = _trayHwnd;
+        var items = await Task.Run(() => TaskbarLayout.Occupied(tray));
+        if (IsDisposed || items is null || !_settings.AvoidTaskbarItems) return;
+        if (_taskbarItems is not null && _taskbarItems.SequenceEqual(items)) return;
+        // While a shell panel (Quick Settings, Start) opens, Explorer briefly reports an empty or partial
+        // taskbar. Acting on that would slide the bar over the weather and back, so keep the last good
+        // layout and look again shortly; a real large change (many apps closed) is still there then.
+        bool suspicious = items.Count == 0 || (_taskbarItems is { Count: > 0 } known && items.Count < known.Count / 2);
+        if (suspicious && !confirming)
+        {
+            RefreshTaskbarItems(1000, confirming: true);
+            return;
+        }
+        if (items.Count == 0) return;
+        _taskbarItems = items;
         PositionOnTaskbar();
     }
 
